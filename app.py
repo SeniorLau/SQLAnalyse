@@ -52,10 +52,11 @@ def safe_identifier(name: str) -> str:
 
 def get_sql_drivers():
     drivers = pyodbc.drivers()
+    # Prefer the same driver used by the original working script.
     preferred = [
+        "SQL Server",
         "ODBC Driver 18 for SQL Server",
         "ODBC Driver 17 for SQL Server",
-        "SQL Server",
     ]
     ordered = [d for d in preferred if d in drivers]
     ordered.extend([d for d in drivers if d not in ordered])
@@ -81,6 +82,38 @@ def connection_string(server, database, driver, trusted=True, username="", passw
     )
 
 
+
+def test_connection(server, driver, trusted, username, password):
+    """
+    Test whether SQL Server can be reached at all.
+    Returns (success, message).
+    """
+    try:
+        conx = pyodbc.connect(
+            connection_string(
+                server=server,
+                database="master",
+                driver=driver,
+                trusted=trusted,
+                username=username,
+                password=password,
+            ),
+            timeout=10,
+        )
+        cursor = conx.cursor()
+        cursor.execute("SELECT @@SERVERNAME, DB_NAME()")
+        row = cursor.fetchone()
+        conx.close()
+
+        server_name = row[0] if row else server
+        database_name = row[1] if row else "master"
+
+        return True, f"Connected to {server_name} ({database_name})."
+
+    except Exception as exc:
+        return False, str(exc)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def list_databases(server, driver, trusted, username, password):
     conx = pyodbc.connect(
@@ -92,7 +125,7 @@ def list_databases(server, driver, trusted, username, password):
             username=username,
             password=password,
         ),
-        timeout=5,
+        timeout=10,
     )
     query = """
     SELECT name
@@ -544,6 +577,15 @@ driver = st.sidebar.selectbox(
 server = st.sidebar.text_input(
     "SQL Server",
     value=r"RV-PC-15\SQLEXPRESS",
+    help=(
+        r"Examples: RV-PC-15\SQLEXPRESS, .\SQLEXPRESS, "
+        r"localhost\SQLEXPRESS, or SERVERNAME,PORT"
+    ),
+)
+
+st.sidebar.caption(
+    "Original script used: "
+    r"`RV-PC-15\SQLEXPRESS` with the `SQL Server` driver."
 )
 
 trusted = st.sidebar.checkbox(
@@ -559,20 +601,47 @@ if not trusted:
     password = st.sidebar.text_input("Password", type="password")
 
 if st.sidebar.button("Connect / refresh databases", use_container_width=True):
-    try:
-        with st.spinner("Connecting to SQL Server..."):
-            st.session_state.databases = list_databases(
-                server,
-                driver,
-                trusted,
-                username,
-                password,
-            )
-        st.sidebar.success(
-            f"Connected. {len(st.session_state.databases)} databases found."
+    with st.spinner("Testing SQL Server connection..."):
+        ok, message = test_connection(
+            server,
+            driver,
+            trusted,
+            username,
+            password,
         )
-    except Exception as e:
-        st.sidebar.error(f"Connection failed: {e}")
+
+    if ok:
+        try:
+            st.sidebar.success(message)
+
+            with st.spinner("Reading databases..."):
+                st.session_state.databases = list_databases(
+                    server,
+                    driver,
+                    trusted,
+                    username,
+                    password,
+                )
+
+            st.sidebar.success(
+                f"{len(st.session_state.databases)} databases found."
+            )
+
+        except Exception as e:
+            st.sidebar.error(f"Connected, but database list failed: {e}")
+
+    else:
+        st.sidebar.error("SQL Server could not be reached.")
+        st.sidebar.code(message)
+
+        st.sidebar.info(
+            "Try these server names if SQL Server is installed on this PC:\n"
+            "• .\\SQLEXPRESS\n"
+            "• localhost\\SQLEXPRESS\n"
+            "• RV-PC-15\\SQLEXPRESS\n\n"
+            "If RV-PC-15 is another computer, make sure it is online and "
+            "SQL Server allows network connections."
+        )
 
 if not st.session_state.databases:
     st.info(
