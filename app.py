@@ -50,140 +50,65 @@ def safe_identifier(name: str) -> str:
     return "[" + name.replace("]", "]]") + "]"
 
 
-def get_sql_drivers():
-    drivers = pyodbc.drivers()
-    # Prefer the same driver used by the original working script.
-    preferred = [
-        "SQL Server",
-        "ODBC Driver 18 for SQL Server",
-        "ODBC Driver 17 for SQL Server",
-    ]
-    ordered = [d for d in preferred if d in drivers]
-    ordered.extend([d for d in drivers if d not in ordered])
-    return ordered
+def get_sql_driver():
+    """
+    Use the same legacy driver as the original Spyder script.
+    """
+    return "SQL Server"
 
 
-def connection_string(server, database, driver, trusted=True, username="", password=""):
-    if trusted:
-        return (
-            f"DRIVER={{{driver}}};"
-            f"SERVER={server};"
-            f"DATABASE={database};"
-            "Trusted_Connection=yes;"
-            "TrustServerCertificate=yes;"
-        )
+
+def connection_string(server, database):
+    """
+    Match the original Spyder/pyodbc connection style.
+    """
     return (
-        f"DRIVER={{{driver}}};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        f"UID={username};"
-        f"PWD={password};"
-        "TrustServerCertificate=yes;"
+        r"driver={SQL Server};"
+        f"server={server};"
+        f"database={database};"
+        r"trusted_connection=YES;"
     )
 
 
 
 
-def test_connection(server, driver, trusted, username, password, database_hint="GMP_fast_roche"):
+
+def test_connection(server, database="GMP_fast_roche"):
     """
-    Test SQL Server connectivity and return detailed diagnostics.
-
-    First tries the exact pattern used in the original script:
-        DRIVER={SQL SERVER}
-        SERVER=RV-PC-15\\SQLEXPRESS
-        DATABASE=GMP_fast_roche
-        Trusted_Connection=YES
-
-    Then tries the selected driver/database combination.
+    Test the exact SQL connection style used in the original Spyder script.
     """
+    try:
+        conx = pyodbc.connect(
+            connection_string(server, database),
+            timeout=10,
+        )
+        cursor = conx.cursor()
+        cursor.execute(
+            "SELECT @@SERVERNAME AS ServerName, "
+            "DB_NAME() AS DatabaseName, "
+            "SYSTEM_USER AS LoginName"
+        )
+        row = cursor.fetchone()
+        conx.close()
 
-    attempts = []
+        return True, {
+            "server": row[0] if row else server,
+            "database": row[1] if row else database,
+            "login": row[2] if row else "",
+        }
 
-    # Attempt 1: exact original-style connection string
-    original_driver = "SQL Server" if "SQL Server" in pyodbc.drivers() else driver
-    original_cs = (
-        f"DRIVER={{{original_driver}}};"
-        f"SERVER={server};"
-        f"DATABASE={database_hint};"
-        "Trusted_Connection=YES;"
-    )
-
-    attempts.append(("Original-style direct connection", original_cs))
-
-    # Attempt 2: selected driver to requested database
-    selected_cs = connection_string(
-        server=server,
-        database=database_hint,
-        driver=driver,
-        trusted=trusted,
-        username=username,
-        password=password,
-    )
-    attempts.append(("Selected driver direct connection", selected_cs))
-
-    # Attempt 3: selected driver to master
-    master_cs = connection_string(
-        server=server,
-        database="master",
-        driver=driver,
-        trusted=trusted,
-        username=username,
-        password=password,
-    )
-    attempts.append(("Selected driver to master", master_cs))
-
-    results = []
-
-    for label, cs in attempts:
-        try:
-            conx = pyodbc.connect(cs, timeout=8)
-            cursor = conx.cursor()
-            cursor.execute(
-                "SELECT @@SERVERNAME AS ServerName, "
-                "DB_NAME() AS DatabaseName, "
-                "SYSTEM_USER AS LoginName"
-            )
-            row = cursor.fetchone()
-            conx.close()
-
-            return True, {
-                "successful_attempt": label,
-                "server": row[0] if row else server,
-                "database": row[1] if row else database_hint,
-                "login": row[2] if row else "",
-                "attempts": results,
-            }
-
-        except Exception as exc:
-            results.append(
-                {
-                    "attempt": label,
-                    "error_type": type(exc).__name__,
-                    "error_repr": repr(exc),
-                    "error_args": [str(x) for x in getattr(exc, "args", [])],
-                }
-            )
-
-    return False, {
-        "successful_attempt": None,
-        "attempts": results,
-        "installed_drivers": pyodbc.drivers(),
-        "server_entered": server,
-        "database_hint": database_hint,
-    }
+    except Exception as exc:
+        return False, {
+            "error_type": type(exc).__name__,
+            "error_repr": repr(exc),
+            "error_args": [str(x) for x in getattr(exc, "args", [])],
+        }
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def list_databases(server, driver, trusted, username, password):
+def list_databases(server):
     conx = pyodbc.connect(
-        connection_string(
-            server=server,
-            database="master",
-            driver=driver,
-            trusted=trusted,
-            username=username,
-            password=password,
-        ),
+        connection_string(server, "master"),
         timeout=10,
     )
     query = """
@@ -198,18 +123,11 @@ def list_databases(server, driver, trusted, username, password):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_vial_ids(server, database, driver, trusted, username, password):
+def get_vial_ids(server, database):
     db = safe_identifier(database)
 
     conx = pyodbc.connect(
-        connection_string(
-            server=server,
-            database=database,
-            driver=driver,
-            trusted=trusted,
-            username=username,
-            password=password,
-        ),
+        connection_string(server, database),
         timeout=10,
     )
 
@@ -229,10 +147,6 @@ def get_vial_ids(server, database, driver, trusted, username, password):
 def load_temperature_data(
     server,
     database,
-    driver,
-    trusted,
-    username,
-    password,
     vial_ids_tuple,
     sample_every,
     device_filter_mode,
@@ -297,14 +211,7 @@ def load_temperature_data(
     params.append(int(sample_every))
 
     conx = pyodbc.connect(
-        connection_string(
-            server=server,
-            database=database,
-            driver=driver,
-            trusted=trusted,
-            username=username,
-            password=password,
-        ),
+        connection_string(server, database),
         timeout=20,
     )
 
@@ -618,90 +525,55 @@ if "raw_data" not in st.session_state:
 
 st.sidebar.header("1. Database")
 
-drivers = get_sql_drivers()
+SQL_DRIVER = "SQL Server"
+SQL_SERVER = r"RV-PC-15\SQLEXPRESS"
 
-if not drivers:
-    st.error(
-        "No SQL Server ODBC driver was found. "
-        "Install Microsoft ODBC Driver 17 or 18 for SQL Server."
-    )
-    st.stop()
-
-driver = st.sidebar.selectbox(
+st.sidebar.text_input(
     "SQL driver",
-    drivers,
-    index=0,
+    value=SQL_DRIVER,
+    disabled=True,
 )
 
-server = st.sidebar.text_input(
+st.sidebar.text_input(
     "SQL Server",
-    value=r"RV-PC-15\SQLEXPRESS",
-    help=(
-        r"Examples: RV-PC-15\SQLEXPRESS, .\SQLEXPRESS, "
-        r"localhost\SQLEXPRESS, or SERVERNAME,PORT"
-    ),
+    value=SQL_SERVER,
+    disabled=True,
 )
 
-st.sidebar.caption(
-    "Original script used: "
-    r"`RV-PC-15\SQLEXPRESS` with the `SQL Server` driver."
+st.sidebar.checkbox(
+    "Use Windows authentication",
+    value=True,
+    disabled=True,
 )
 
 database_hint = st.sidebar.text_input(
-    "Database for direct connection test",
+    "Default database",
     value="GMP_fast_roche",
-    help="The original script connected directly to this database.",
 )
-
-trusted = st.sidebar.checkbox(
-    "Use Windows authentication",
-    value=True,
-)
-
-username = ""
-password = ""
-
-if not trusted:
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
 
 if st.sidebar.button("Connect / refresh databases", use_container_width=True):
     with st.spinner("Testing SQL Server connection..."):
         ok, details = test_connection(
-            server,
-            driver,
-            trusted,
-            username,
-            password,
-            database_hint=database_hint,
+            SQL_SERVER,
+            database=database_hint,
         )
 
     if ok:
         st.sidebar.success(
-            f"Connected via: {details['successful_attempt']}"
+            f"Connected to {details['server']} / {details['database']}"
         )
-        st.sidebar.caption(
-            f"Server: {details['server']} | "
-            f"Database: {details['database']} | "
-            f"Login: {details['login']}"
-        )
+        if details.get("login"):
+            st.sidebar.caption(f"Login: {details['login']}")
 
         try:
             with st.spinner("Reading databases..."):
                 st.session_state.databases = list_databases(
-                    server,
-                    driver,
-                    trusted,
-                    username,
-                    password,
+                    SQL_SERVER,
                 )
-
             st.sidebar.success(
                 f"{len(st.session_state.databases)} databases found."
             )
-
         except Exception as e:
-            # If master/database listing is restricted, still allow direct use.
             st.sidebar.warning(
                 "Direct connection works, but the database list could not be read."
             )
@@ -710,24 +582,14 @@ if st.sidebar.button("Connect / refresh databases", use_container_width=True):
 
     else:
         st.sidebar.error("SQL Server could not be reached.")
-
-        st.sidebar.markdown("**Connection diagnostics**")
-        for result in details["attempts"]:
-            st.sidebar.markdown(f"**{result['attempt']}**")
-            st.sidebar.code(
-                f"Type: {result['error_type']}\n"
-                f"repr: {result['error_repr']}\n"
-                f"args: {result['error_args']}"
-            )
-
-        st.sidebar.markdown("**Installed ODBC drivers**")
-        st.sidebar.code("\n".join(details["installed_drivers"]) or "None found")
-
+        st.sidebar.code(
+            f"Type: {details['error_type']}\n"
+            f"repr: {details['error_repr']}\n"
+            f"args: {details['error_args']}"
+        )
         st.sidebar.info(
-            "If your old Python script still connects successfully, "
-            "run Streamlit from the same Anaconda environment as that script. "
-            "For example:\n\n"
-            "python -m streamlit run app.py"
+            "This app is now using the exact same driver/server style "
+            "as the original Spyder script."
         )
 
 if not st.session_state.databases:
@@ -745,12 +607,8 @@ if st.sidebar.button("Load vial list", use_container_width=True):
     try:
         with st.spinner("Reading vial IDs..."):
             st.session_state.available_vials = get_vial_ids(
-                server,
+                SQL_SERVER,
                 database,
-                driver,
-                trusted,
-                username,
-                password,
             )
         st.sidebar.success(
             f"{len(st.session_state.available_vials)} vial IDs found."
@@ -872,12 +730,8 @@ if st.sidebar.button("Load selected vial data", type="primary", use_container_wi
                 f"Loading data for {len(selected_vials)} vial(s)..."
             ):
                 st.session_state.raw_data = load_temperature_data(
-                    server=server,
+                    server=SQL_SERVER,
                     database=database,
-                    driver=driver,
-                    trusted=trusted,
-                    username=username,
-                    password=password,
                     vial_ids_tuple=tuple(selected_vials),
                     sample_every=sample_every,
                     device_filter_mode=device_filter_mode,
