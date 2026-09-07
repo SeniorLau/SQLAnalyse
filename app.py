@@ -83,35 +83,94 @@ def connection_string(server, database, driver, trusted=True, username="", passw
 
 
 
-def test_connection(server, driver, trusted, username, password):
+
+def test_connection(server, driver, trusted, username, password, database_hint="GMP_fast_roche"):
     """
-    Test whether SQL Server can be reached at all.
-    Returns (success, message).
+    Test SQL Server connectivity and return detailed diagnostics.
+
+    First tries the exact pattern used in the original script:
+        DRIVER={SQL SERVER}
+        SERVER=RV-PC-15\\SQLEXPRESS
+        DATABASE=GMP_fast_roche
+        Trusted_Connection=YES
+
+    Then tries the selected driver/database combination.
     """
-    try:
-        conx = pyodbc.connect(
-            connection_string(
-                server=server,
-                database="master",
-                driver=driver,
-                trusted=trusted,
-                username=username,
-                password=password,
-            ),
-            timeout=10,
-        )
-        cursor = conx.cursor()
-        cursor.execute("SELECT @@SERVERNAME, DB_NAME()")
-        row = cursor.fetchone()
-        conx.close()
 
-        server_name = row[0] if row else server
-        database_name = row[1] if row else "master"
+    attempts = []
 
-        return True, f"Connected to {server_name} ({database_name})."
+    # Attempt 1: exact original-style connection string
+    original_driver = "SQL Server" if "SQL Server" in pyodbc.drivers() else driver
+    original_cs = (
+        f"DRIVER={{{original_driver}}};"
+        f"SERVER={server};"
+        f"DATABASE={database_hint};"
+        "Trusted_Connection=YES;"
+    )
 
-    except Exception as exc:
-        return False, str(exc)
+    attempts.append(("Original-style direct connection", original_cs))
+
+    # Attempt 2: selected driver to requested database
+    selected_cs = connection_string(
+        server=server,
+        database=database_hint,
+        driver=driver,
+        trusted=trusted,
+        username=username,
+        password=password,
+    )
+    attempts.append(("Selected driver direct connection", selected_cs))
+
+    # Attempt 3: selected driver to master
+    master_cs = connection_string(
+        server=server,
+        database="master",
+        driver=driver,
+        trusted=trusted,
+        username=username,
+        password=password,
+    )
+    attempts.append(("Selected driver to master", master_cs))
+
+    results = []
+
+    for label, cs in attempts:
+        try:
+            conx = pyodbc.connect(cs, timeout=8)
+            cursor = conx.cursor()
+            cursor.execute(
+                "SELECT @@SERVERNAME AS ServerName, "
+                "DB_NAME() AS DatabaseName, "
+                "SYSTEM_USER AS LoginName"
+            )
+            row = cursor.fetchone()
+            conx.close()
+
+            return True, {
+                "successful_attempt": label,
+                "server": row[0] if row else server,
+                "database": row[1] if row else database_hint,
+                "login": row[2] if row else "",
+                "attempts": results,
+            }
+
+        except Exception as exc:
+            results.append(
+                {
+                    "attempt": label,
+                    "error_type": type(exc).__name__,
+                    "error_repr": repr(exc),
+                    "error_args": [str(x) for x in getattr(exc, "args", [])],
+                }
+            )
+
+    return False, {
+        "successful_attempt": None,
+        "attempts": results,
+        "installed_drivers": pyodbc.drivers(),
+        "server_entered": server,
+        "database_hint": database_hint,
+    }
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -588,6 +647,12 @@ st.sidebar.caption(
     r"`RV-PC-15\SQLEXPRESS` with the `SQL Server` driver."
 )
 
+database_hint = st.sidebar.text_input(
+    "Database for direct connection test",
+    value="GMP_fast_roche",
+    help="The original script connected directly to this database.",
+)
+
 trusted = st.sidebar.checkbox(
     "Use Windows authentication",
     value=True,
@@ -602,18 +667,26 @@ if not trusted:
 
 if st.sidebar.button("Connect / refresh databases", use_container_width=True):
     with st.spinner("Testing SQL Server connection..."):
-        ok, message = test_connection(
+        ok, details = test_connection(
             server,
             driver,
             trusted,
             username,
             password,
+            database_hint=database_hint,
         )
 
     if ok:
-        try:
-            st.sidebar.success(message)
+        st.sidebar.success(
+            f"Connected via: {details['successful_attempt']}"
+        )
+        st.sidebar.caption(
+            f"Server: {details['server']} | "
+            f"Database: {details['database']} | "
+            f"Login: {details['login']}"
+        )
 
+        try:
             with st.spinner("Reading databases..."):
                 st.session_state.databases = list_databases(
                     server,
@@ -628,19 +701,33 @@ if st.sidebar.button("Connect / refresh databases", use_container_width=True):
             )
 
         except Exception as e:
-            st.sidebar.error(f"Connected, but database list failed: {e}")
+            # If master/database listing is restricted, still allow direct use.
+            st.sidebar.warning(
+                "Direct connection works, but the database list could not be read."
+            )
+            st.sidebar.code(repr(e))
+            st.session_state.databases = [database_hint]
 
     else:
         st.sidebar.error("SQL Server could not be reached.")
-        st.sidebar.code(message)
+
+        st.sidebar.markdown("**Connection diagnostics**")
+        for result in details["attempts"]:
+            st.sidebar.markdown(f"**{result['attempt']}**")
+            st.sidebar.code(
+                f"Type: {result['error_type']}\n"
+                f"repr: {result['error_repr']}\n"
+                f"args: {result['error_args']}"
+            )
+
+        st.sidebar.markdown("**Installed ODBC drivers**")
+        st.sidebar.code("\n".join(details["installed_drivers"]) or "None found")
 
         st.sidebar.info(
-            "Try these server names if SQL Server is installed on this PC:\n"
-            "• .\\SQLEXPRESS\n"
-            "• localhost\\SQLEXPRESS\n"
-            "• RV-PC-15\\SQLEXPRESS\n\n"
-            "If RV-PC-15 is another computer, make sure it is online and "
-            "SQL Server allows network connections."
+            "If your old Python script still connects successfully, "
+            "run Streamlit from the same Anaconda environment as that script. "
+            "For example:\n\n"
+            "python -m streamlit run app.py"
         )
 
 if not st.session_state.databases:
